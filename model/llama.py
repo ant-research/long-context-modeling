@@ -28,7 +28,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter, _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
@@ -134,21 +133,13 @@ class LlamaRotaryEmbedding(nn.Module):
             seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.get_default_dtype()
         )
 
-    # def _set_cos_sin_cache(self, seq_len, device, dtype):
-    #     self.max_seq_len_cached = seq_len
-    #     t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-
-    #     freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-    #     # Different from paper, but it uses a different permutation in order to obtain the same calculation
-    #     emb = torch.cat((freqs, freqs), dim=-1)
-    #     self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-    #     self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
-
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
 
-        emb = torch.einsum("i,j->ij", t, self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
@@ -233,91 +224,39 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
 
-# def rotate_half(x):
-#     """Rotates half the hidden dims of the input."""
-#     x1 = x[..., : x.shape[-1] // 2]
-#     x2 = x[..., x.shape[-1] // 2 :]
-#     return torch.cat((-x2, x1), dim=-1)
-
-# def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
-#     """Applies Rotary Position Embedding to the query and key tensors.
-
-#     Args:
-#         q (`torch.Tensor`): The query tensor.
-#         k (`torch.Tensor`): The key tensor.
-#         cos (`torch.Tensor`): The cosine part of the rotary embedding.
-#         sin (`torch.Tensor`): The sine part of the rotary embedding.
-#         position_ids (`torch.Tensor`):
-#             The position indices of the tokens corresponding to the query and key tensors. For example, this can be
-#             used to pass offsetted position ids when working with a KV-cache.
-#         unsqueeze_dim (`int`, *optional*, defaults to 1):
-#             The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-#             sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-#             that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-#             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-#             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-#             the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-#     Returns:
-#         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-#     """
-#     cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-#     sin = sin[position_ids].unsqueeze(unsqueeze_dim)
-#     q_embed = (q * cos) + (rotate_half(q) * sin)
-#     k_embed = (k * cos) + (rotate_half(k) * sin)
-#     return q_embed, k_embed
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
-    from model.rotary import apply_rotary_emb_func # fused_rotary
-    # assert is_flash_attn_2_available(), "need to load fused operator from flash_attn_2"
-    assert unsqueeze_dim == 1, "fused rotary pos emb only supports unsqueeze_dim=1"
-    assert q.shape[-1] == cos.shape[-1]*2, "q and cos must have the same embedding dimension"
-    if len(position_ids.shape) == 2:
-        N = position_ids.shape[0]
-        L = position_ids.shape[1]
-        position_ids_flatten = position_ids.flatten()
-        cos = cos[position_ids_flatten].view(N, L, -1)
-        sin = sin[position_ids_flatten].view(N, L, -1)
-        # cos = cos.unsqueeze(0).repeat(N, 1, 1).gather(dim=1, index=position_ids)
-        # sin = sin.unsqueeze(0).repeat(N, 1, 1).gather(dim=1, index=position_ids)
-    elif len(position_ids.shape) == 1:
-        cos = cos[position_ids]
-        sin = sin[position_ids]
-    q_embed = apply_rotary_emb_func(q.transpose(1, 2), cos, sin).transpose(1, 2)
-    k_embed = apply_rotary_emb_func(k.transpose(1, 2), cos, sin).transpose(1, 2)
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`):
+            The position indices of the tokens corresponding to the query and key tensors. For example, this can be
+            used to pass offsetted position ids when working with a KV-cache.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-# class LlamaMLP(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         self.config = config
-#         self.hidden_size = config.hidden_size
-#         self.intermediate_size = config.intermediate_size
-#         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-#         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-#         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-#         self.act_fn = ACT2FN[config.hidden_act]
-
-#     def forward(self, x):
-#         if self.config.pretraining_tp > 1:
-#             slice = self.intermediate_size // self.config.pretraining_tp
-#             gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-#             up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-#             down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-#             gate_proj = torch.cat(
-#                 [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-#             )
-#             up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-#             intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-#             down_proj = [
-#                 F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-#             ]
-#             down_proj = sum(down_proj)
-#         else:
-#             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-#         return down_proj
 
 class GPT2MLP(nn.Module):
     def __init__(self, config):
