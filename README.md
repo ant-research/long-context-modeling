@@ -1,4 +1,4 @@
-Official implementation for paper "[Efficient Length-Generalizable Attention via Causal Retrieval for Long-Context Language Modeling](https://arxiv.org/abs/2410.01651)"
+Official implementation for paper "[Efficient Length-Generalizable Attention via Causal Retrieval for Long-Context Language Modeling](https://arxiv.org/abs/2410.01651)" (ICML 2025)
 
 This repository is still under construction.
 
