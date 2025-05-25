@@ -888,98 +888,6 @@ def gca_kv_cache(q, k, v, weights, sm_scale, sm_n):
     return o
 
 
-# @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM, K", [(256, 8, 64, 64, 8)])
-# @pytest.mark.parametrize("causal", [False])
-# def test_op(Z, H, N_CTX, HEAD_DIM, K, causal, dtype=torch.bfloat16):
-#     import torch.nn.functional as F
-#     torch.manual_seed(22)
-#     # q = (torch.empty((Z + 1, H * (N_CTX + 1), HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     # q = rearrange(q, 'Z (H L) D -> Z H L D ', H=H)
-#     # # print(q.stride())
-#     # org_q = q
-#     # q = q[:-1, :, :-1, :]
-#     # q_ = q.contiguous()
-#     q = (torch.empty((Z, H, N_CTX + 1, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     k = (torch.empty((Z, H, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     v = (torch.empty((Z, H, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
-#     # weights = torch.ones((Z, K), dtype=dtype, device='cuda').requires_grad_()
-#     sm_scale = 1 / 8
-#     dout = torch.randn_like(q)
-#     # reference implementation
-#     # M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-#     # p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-#     p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q.float(), k.float()) * sm_scale
-#     # if causal:
-#     #     p[:, :, M == 0] = float("-inf")
-#     p = torch.softmax(p, dim=-1).to(dtype)
-#     # p = torch.exp(p)
-#     # ref_out = torch.matmul(p, v)
-#     o_k = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v)
-#     ref_out = torch.einsum('Z H K M h, Z K->Z H M h', o_k, weights)
-#     ref_out.backward(dout)
-#     ref_dv, v.grad = v.grad.clone(), None
-#     ref_dk, k.grad = k.grad.clone(), None
-#     ref_dq, q.grad = q.grad.clone(), None
-#     ref_dw, weights.grad = weights.grad.clone(), None
-#     # triton implementation
-#     tri_out = attention(q, k, v, weights, sm_scale, 0)
-#     tri_out.backward(dout)
-#     tri_dv, v.grad = v.grad.clone(), None
-#     tri_dk, k.grad = k.grad.clone(), None
-#     tri_dq, q.grad = q.grad.clone(), None
-#     tri_dw, weights.grad = weights.grad.clone(), None
-#     # compare
-#     assert not torch.any(torch.isnan(tri_out))
-#     # print(ref_out[:, -1, -5:, :5])
-#     # print(tri_out[:, -1, -5:, :5])
-#     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0), (ref_out - tri_out).abs().max()
-#     rtol = 0.0
-#     # Relative tolerance workaround for known hardware limitation of MI200 GPU.
-#     # For details see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
-#     if torch.version.hip is not None and triton.runtime.driver.active.get_current_target().arch == "gfx90a":
-#         rtol = 1e-2
-#     # print(tri_dv[])
-
-#     # delta_ref = torch.einsum(
-#     #     'N H S D, N H K S D->N H K S', dout.to(torch.float32), o_k.to(torch.float32)
-#     # )
-#     # delta_w = rearrange(delta_ref, 'N H K Q -> N (H Q) K').sum(dim=1).to(torch.bfloat16)
-#     # assert torch.allclose(delta_w, ref_dw, atol=1e-2, rtol=0),  (delta_w - ref_dw).abs().max()
-    
-
-    
-#     assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol), (ref_dv - tri_dv).abs().max()
-#     assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=rtol), (ref_dk - tri_dk).abs().max()
-#     assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol), (ref_dq - tri_dq).abs().max()
-#     assert torch.allclose(ref_dw, tri_dw, atol=0.5, rtol=rtol), (ref_dw - tri_dw).abs().max()
-
-#     with torch.no_grad():
-#         # K = 6
-#         # HEAD_DIM = 32
-#         # Z = 1
-#         q = (torch.empty((Z, H, 2, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#         k = (torch.empty((Z, H, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#         v = (torch.empty((Z, H, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#         weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
-#         sm_scale = 0.5
-#         p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q, k) * sm_scale
-#         # if causal:
-#         #     p[:, :, M == 0] = float("-inf")
-#         p = torch.softmax(p, dim=-1)
-#         # p = torch.exp(p)
-#         # ref_out = torch.matmul(p, v)
-#         ref_out = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v)
-#         ref_out = torch.einsum('Z H K M h, Z K->Z H M h', ref_out, weights)
-#         tri_out = gca_kv_cache(q, k, v, weights, sm_scale, 0.0)  # (Z H M dim)
-#         # print(ref_out[0, 0, 0, :5])
-#         # print(tri_out[0, 0, 0, :5])
-#         # print(ref_out[0, 1, 0, :5])
-#         # print(tri_out[0, 1, 0, :5])
-#         assert ref_out.shape == tri_out.shape
-#         assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-
-
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM, K", [(512, 40, 64, 64, 32)])
 @pytest.mark.parametrize("causal", [False])
 def test_group_qa(Z, H, N_CTX, HEAD_DIM, K, causal, dtype=torch.bfloat16):
@@ -1052,55 +960,55 @@ def test_group_qa(Z, H, N_CTX, HEAD_DIM, K, causal, dtype=torch.bfloat16):
     assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol), (ref_dq - tri_dq).abs().max()
     assert torch.allclose(ref_dw, tri_dw, atol=0.5, rtol=rtol), (ref_dw - tri_dw).abs().max()
 
-    # with torch.no_grad():
-    #     # K = 6
-    #     # HEAD_DIM = 32
-    #     # Z = 1
-    #     q = (torch.empty((Z, H, 2, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     k = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     v = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
-    #     sm_scale = 0.5
-    #     k_ = torch.repeat_interleave(k, dim=1, repeats=2)
-    #     v_ = torch.repeat_interleave(v, dim=1, repeats=2)
-    #     p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q, k_) * sm_scale
-    #     # if causal:
-    #     #     p[:, :, M == 0] = float("-inf")
-    #     p = torch.softmax(p, dim=-1)
-    #     # p = torch.exp(p)
-    #     # ref_out = torch.matmul(p, v)
-    #     ref_out = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v_)
-    #     ref_out = torch.einsum('Z H K M h, Z K->Z H M h', ref_out, weights)
-    #     tri_out = gca_kv_cache(q, k, v, weights, sm_scale, 0.0)  # (Z H M dim)
-    #     # print(ref_out[0, 0, 0, :5])
-    #     # print(tri_out[0, 0, 0, :5])
-    #     # print(ref_out[0, 1, 0, :5])
-    #     # print(tri_out[0, 1, 0, :5])
-    #     assert ref_out.shape == tri_out.shape
-    #     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
+    with torch.no_grad():
+        # K = 6
+        # HEAD_DIM = 32
+        # Z = 1
+        q = (torch.empty((Z, H, 2, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        k = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        v = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
+        sm_scale = 0.5
+        k_ = torch.repeat_interleave(k, dim=1, repeats=2)
+        v_ = torch.repeat_interleave(v, dim=1, repeats=2)
+        p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q, k_) * sm_scale
+        # if causal:
+        #     p[:, :, M == 0] = float("-inf")
+        p = torch.softmax(p, dim=-1)
+        # p = torch.exp(p)
+        # ref_out = torch.matmul(p, v)
+        ref_out = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v_)
+        ref_out = torch.einsum('Z H K M h, Z K->Z H M h', ref_out, weights)
+        tri_out = gca_kv_cache(q, k, v, weights, sm_scale, 0.0)  # (Z H M dim)
+        # print(ref_out[0, 0, 0, :5])
+        # print(tri_out[0, 0, 0, :5])
+        # print(ref_out[0, 1, 0, :5])
+        # print(tri_out[0, 1, 0, :5])
+        assert ref_out.shape == tri_out.shape
+        assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
 
-    #     q = (torch.empty((Z, H, 1, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     k = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     v = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    #     weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
-    #     sm_scale = 0.5
-    #     k_ = torch.repeat_interleave(k, dim=1, repeats=2)
-    #     v_ = torch.repeat_interleave(v, dim=1, repeats=2)
-    #     p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q, k_) * sm_scale
-    #     # if causal:
-    #     #     p[:, :, M == 0] = float("-inf")
-    #     p = torch.softmax(p, dim=-1)
-    #     # p = torch.exp(p)
-    #     # ref_out = torch.matmul(p, v)
-    #     ref_out = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v_)
-    #     ref_out = torch.einsum('Z H K M h, Z K->Z H M h', ref_out, weights)
-    #     tri_out = gca_kv_cache(q, k, v, weights, sm_scale, 0.0)  # (Z H M dim)
-    #     # print(ref_out[0, 0, 0, :5])
-    #     # print(tri_out[0, 0, 0, :5])
-    #     # print(ref_out[0, 1, 0, :5])
-    #     # print(tri_out[0, 1, 0, :5])
-    #     assert ref_out.shape == tri_out.shape
-    #     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
+        q = (torch.empty((Z, H, 1, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        k = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        v = (torch.empty((Z, H // 2, K, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        weights = F.softmax(torch.tensor(torch.rand(Z, K), dtype=dtype, device='cuda'), dim=-1).requires_grad_()
+        sm_scale = 0.5
+        k_ = torch.repeat_interleave(k, dim=1, repeats=2)
+        v_ = torch.repeat_interleave(v, dim=1, repeats=2)
+        p = torch.einsum('Z H M h, Z H K N h->Z H K M N', q, k_) * sm_scale
+        # if causal:
+        #     p[:, :, M == 0] = float("-inf")
+        p = torch.softmax(p, dim=-1)
+        # p = torch.exp(p)
+        # ref_out = torch.matmul(p, v)
+        ref_out = torch.einsum('Z H K M N, Z H K N h->Z H K M h', p, v_)
+        ref_out = torch.einsum('Z H K M h, Z K->Z H M h', ref_out, weights)
+        tri_out = gca_kv_cache(q, k, v, weights, sm_scale, 0.0)  # (Z H M dim)
+        # print(ref_out[0, 0, 0, :5])
+        # print(tri_out[0, 0, 0, :5])
+        # print(ref_out[0, 1, 0, :5])
+        # print(tri_out[0, 1, 0, :5])
+        assert ref_out.shape == tri_out.shape
+        assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
 
 
 try:

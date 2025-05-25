@@ -31,10 +31,7 @@ def _read_directory(path):
     return np.array(texts, dtype=np.uint16)
 
 
-# raw_eval_data = _read_directory("/ossfs/workspace/antnlp/aaron.hx/corpus/pg19-validation")
-# raw_eval_data.tofile('/ossfs/workspace/antnlp/aaron.hx/corpus/pg19.validation.bin')
-# raw_train_data = _read_directory("/ossfs/workspace/antnlp/aaron.hx/corpus/pg19")
-# raw_train_data.tofile('/ossfs/workspace/antnlp/aaron.hx/corpus/pg19.train.bin')
-
-raw_test_data = _read_directory("/ossfs/workspace/antnlp/aaron.hx/corpus/pg19-test/test")
-raw_test_data.tofile('/ossfs/workspace/antnlp/aaron.hx/corpus/pg19_gpt2/test/data')
+PATH_TO_PG19 = ''
+PATH_TO_PROCESSED_PG19 = ''
+raw_test_data = _read_directory(f"{PATH_TO_PG19}/train")
+raw_test_data.tofile(f'{PATH_TO_PROCESSED_PG19}/train/data')

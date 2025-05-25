@@ -1,0 +1,19 @@
+torchrun --standalone --nnodes=1 --nproc_per_node=8 summarization_trainer.py \
+    --config_path config/DRT/config_63.json \
+    --vocab_dir config/gpt2-small \
+    --lr 2e-3 \
+    --min_lr 4e-4 \
+    --corpus_path PATH_TO_PREPROCESSED_CORPUS \
+    --checkpoint_dir PATH_TO_PRETRAIN_CHECKPOINTS \
+    --output_dir OUTPUT_DIR \
+    --batch_size 8 \
+    --task_type summarization \
+    --max_seq_len 4097 \
+    --max_sum_len 1024 \
+    --epochs 10 \
+    --warm_up 0.02 \
+    --accumulation_steps 1 \
+    --model_type YOUR_MODEL_TYPE \
+    --log_step 50 \
+    --eval_steps 99999 \
+    --save_steps 2500

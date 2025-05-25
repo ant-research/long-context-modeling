@@ -1,18 +1,17 @@
-
 torchrun --standalone --nnodes=1 --nproc_per_node=8 trainer/slidewindow_trainer.py \
     --config_path config/DRT/config_63.json \
     --vocab_dir config/gpt2-small \
     --lr 2e-3 \
     --min_lr 4e-4 \
-    --corpus_path ../../../antnlp/aaron.hx/corpus/pg19_gpt2/train \
-    --valid_corpus_path ../../../antnlp/aaron.hx/corpus/pg19_gpt2/valid \
-    --output_dir ../../../antnlp/aaron.hx/DRT_res_x63_pg19_12_60k_triton/ \
-    --batch_size 1 \
-    --max_seq_len 126 \
+    --corpus_path PATH_TO_CORPUS \
+    --valid_corpus_path PATH_TO_VALID \
+    --output_dir PATH_TO_OUTPUT \
+    --batch_size 4 \
+    --max_seq_len 16380 \
     --total_steps 60000 \
     --warm_up 0.02 \
     --accumulation_steps 1 \
-    --model_type DRT \
+    --model_type MODEL_NAME(DRT/slide_window_lm/rpt_contriever/blk_rec_tfm) \
     --log_step 50 \
     --eval_steps 5000 \
     --save_steps 5000

@@ -9,7 +9,21 @@ torch==2.4.0, transformers>=4.36.0, triton==3.0.0
 
 ### Data Preparation
 
-[ArXiv-math](https://huggingface.co/datasets/hoskinson-center/proof-pile), [PG19](https://huggingface.co/datasets/emozilla/pg19)
+[ArXiv-math](https://huggingface.co/datasets/hoskinson-center/proof-pile), [PG19](https://huggingface.co/datasets/emozilla/pg19), [XSUM](https://huggingface.co/datasets/EdinburghNLP/xsum), [CNN/DailyMail](https://huggingface.co/datasets/abisee/cnn_dailymail)
+
+pre-processing:
+
+PG19: `python preprocess/pg19_prepare.py`
+
+ArXiv: `python preprocess/arxiv_math_prepare.py`
+
+Summarization: `python preprocess/summarization_preprocess.py`
+
+
+
+### Triton unittest
+
+`pytest ltriton/gca.py`
 
 ### Pre-training
 
