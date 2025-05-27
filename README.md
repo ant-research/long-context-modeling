@@ -2,8 +2,16 @@ Official implementation for paper "[Efficient Length-Generalizable Attention via
 
 ### Model Architecture
 <img src="figures/gca_model_arch.png" width="800">
-When generating the current chunk (c7), GCA (Grouped CA) retrieves past chunks using the landmark representation of c6 to assist in token prediction for the next chunk. The key to GCA's length generalization lies in an end-to-end differentiable retrieval mechanism. The critical aspect is that tokens in c7 perform cross-attention with each retrieved chunk to obtain chunk-level information. Finally, this information is fused using weights derived from a softmax over the retrieval scores, allowing the retrieval scores to participate in the forward process and making it differentiable.
+When generating the current chunk (c7), GCA (Grouped CA) retrieves past chunks using the landmark representation of c6 to assist in token prediction for the next chunk. The key to GCA's length generalization lies in an end-to-end differentiable retrieval mechanism, which is achieved through a two-stage attention mechanism. After selecting the top-k chunks:
 
+In the first stage, each token in c7 performs attention with the tokens within the retrieved chunk respectively to obtain information from that chunk. Taking the example in the diagram, $x^{20}$ interacts with the tokens of the i-th retrieved chunk through attention, resulting in the corresponding output $O_{20}^i$.
+
+In the second stage, the softmax-normalized retrieval scores of the chunks are used as weights to perform a weighted summation of $O_{20}^i$, thereby incorporating the retrieval scores into the forward propagation process.
+
+During backpropagation (BP), the weights of past chunks that better facilitate token prediction for the next chunk will be enhanced, enabling end-to-end causal retrieval learning.
+
+<!--The critical aspect is that tokens in c7 perform cross-attention with each retrieved chunk to obtain chunk-level information. Finally, this information is fused using weights derived from a softmax over the retrieval scores, allowing the retrieval scores to participate in the forward process and making it differentiable.
+-->
 ### Results
 
 <img src="figures/key_results.png" width="800">
