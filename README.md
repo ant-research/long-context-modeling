@@ -59,17 +59,21 @@ NIAH tests
 
 Eval perplexity:
 
-`python slidewin_eval.py \ 
+```bash
+python slidewin_eval.py \ 
    	 --config_path PATH_TO_YOUR_CONFIG \
     --vocab_dir config/gpt2-small \
     --corpus_path PATH_TO_VALID_SET \
     --max_seq_len MAX_SEQ_LEN \
     --stride -1 \
     --checkpoint_path PATH_TO_YOUR_CHECKPOINT \
-    --model_type MODEL_TYPE(DRT/slide_window_lm/rpt_contriever/blk_rec_tfm/llama_with_landmark)`
+    --model_type MODEL_TYPE(DRT/slide_window_lm/rpt_contriever/blk_rec_tfm/llama_with_landmark)
+```
     
 Eval passkey-retrieval:
-`python slidewin_eval.py \
+
+```bash
+python slidewin_eval.py \
     --config_path PATH_TO_YOUR_CONFIG \
     --vocab_dir config/gpt2-small \
     --corpus_path PATH_TO_VALID_SET \
@@ -77,16 +81,20 @@ Eval passkey-retrieval:
     --passkey_retrieval single/multihop/multi \
     --stride -1 \
     --checkpoint_path PATH_TO_YOUR_CHECKPOINT \
-    --model_type MODEL_TYPE(DRT/slide_window_lm/rpt_contriever/blk_rec_tfm/llama_with_landmark)`
+    --model_type MODEL_TYPE(DRT/slide_window_lm/rpt_contriever/blk_rec_tfm/llama_with_landmark)
+```
     
 To evaluate the summarization task, you need to first generate the summary and then evaluate the generated results. The script for the generation part is as follows:
-`python eval/gen_summarization.py \
+
+```bash
+python eval/gen_summarization.py \
   --model_path PATH_TO_FINETUNED_MODEL \
   --model_type MODEL_TYPE \
   --config_path PATH_TO_YOUR_CONFIG \
   --vocab_dir config/gpt2-small \
   --corpus_path /PATH_TO_PREPROCESSED_CORPUS/test.pkl \
-  --output_path /PATH_TO_OUTPUT/OUTPUT_NAME.pkl`
+  --output_path /PATH_TO_OUTPUT/OUTPUT_NAME.pkl
+```
 
 
 ### Contact
