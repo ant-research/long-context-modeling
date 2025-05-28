@@ -1,0 +1,19 @@
+torchrun --standalone --nnodes=1 --nproc_per_node=8 slidewindow_trainer.py \
+    --config_path PATH_TO_CONFIG \
+    --vocab_dir config/gpt2-small \
+    --lr 2e-3 \
+    --min_lr 4e-4 \
+    --corpus_path PATH_TO_PG19_TRAINING_CORPUS \
+    --valid_corpus_path PATH_TO_PG19_VALID_CORPUS \
+    --output_dir YOUR_OUTPUT_DIR \
+    --batch_size 2 \
+    --chunk_size 64 \
+    --max_seq_len 16384 \
+    --total_steps 60000 \
+    --passkey_retrieval single/multi/multihop \
+    --warm_up 0.01 \
+    --accumulation_steps 1 \
+    --model_type MODEL_TYPE \
+    --log_step 50 \
+    --eval_steps 500 \
+    --save_steps 10000
