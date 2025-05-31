@@ -55,6 +55,8 @@ NIAH tests
 
 `sh scripts/niah_ft.sh`
 
+Please note that we have observed whether to enable `softmax_off_by_one` has an impact on the results. Therefore, when fine-tuning for the NIAH task, we use vanilla softmax by setting `enable_softmax_one` to false in the config. 
+
 ### Evaluation
 
 Eval perplexity:
