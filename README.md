@@ -36,9 +36,15 @@ Summarization: `python preprocess/summarization_preprocess.py`
 
 
 
-### Triton unittest
+### Unittests
+
+Test triton kernel:
 
 `pytest ltriton/gca.py`
+
+Test DRT generation:
+
+`python -m unittest tests/generation_unittest.py`
 
 ### Pre-training
 
