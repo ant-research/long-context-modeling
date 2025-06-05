@@ -1,4 +1,5 @@
 # coding=utf-8
+# Author: Xiang Hu
 # Copyright 2025 Ant Group
 
 """ PyTorch LLaMA model. Based on transformers==4.35.2"""
@@ -72,13 +73,14 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 
 
 class ChunkKVManager:
-    def __init__(self, offloading=False):
+    def __init__(self, offloading=False, group_size=1):
         self.chunk_k = None
         self.chunk_v = None
         self.lmk_embs = None
-        self._current_chunk_k = None
-        self._current_chunk_v = None
-        self._current_weights = None
+        self.group_size = group_size
+        self._current_chunk_k = [None for _ in range(group_size)]
+        self._current_chunk_v = [None for _ in range(group_size)]
+        self._current_weights = [None for _ in range(group_size)]
         self._current_hidden_states = None
         self._offloading = offloading
 
@@ -134,9 +136,8 @@ class ChunkKVManager:
     def past_lmk_embeds(self):
         return self.lmk_embs
 
-    @property
-    def current_retrieved_chunk(self):
-        return self._current_chunk_k, self._current_chunk_v, self._current_weights
+    def current_retrieved_chunk(self, group_idx=0):
+        return self._current_chunk_k[group_idx], self._current_chunk_v[group_idx], self._current_weights[group_idx]
 
     @property
     def lower_hidden_states(self):
@@ -154,7 +155,7 @@ class ChunkKVManager:
                 [self._current_hidden_states, hidden_states], dim=1
             )
 
-    def update_current_retrieved_chunk(self, indices, weights):
+    def update_current_retrieved_chunk(self, indices, weights, group_idx):
         N = indices.shape[0]
         org_device = indices.device
         if indices.shape[1] > 0:
@@ -164,8 +165,8 @@ class ChunkKVManager:
             if len(indices.shape) == 3:
                 indices = indices[:, -1, :]
             if not self._offloading:
-                self._current_chunk_k = self.chunk_k[batch_indices, indices]  # (N, K, S, dim)
-                self._current_chunk_v = self.chunk_v[batch_indices, indices]
+                self._current_chunk_k[group_idx] = self.chunk_k[batch_indices, indices]  # (N, K, S, dim)
+                self._current_chunk_v[group_idx] = self.chunk_v[batch_indices, indices]
             else:
                 gather_chunk_ks = []
                 gather_chunk_vs = []
@@ -179,15 +180,15 @@ class ChunkKVManager:
                     current_chunk_vs = torch.stack(current_chunk_vs, dim=0)
                     gather_chunk_ks.append(current_chunk_ks)
                     gather_chunk_vs.append(current_chunk_vs)
-                self._current_chunk_k = torch.stack(gather_chunk_ks)
-                self._current_chunk_v = torch.stack(gather_chunk_vs)
-            self._current_weights = weights[:, -1:, :]
+                self._current_chunk_k[group_idx] = torch.stack(gather_chunk_ks)
+                self._current_chunk_v[group_idx] = torch.stack(gather_chunk_vs)
+            self._current_weights[group_idx] = weights[:, -1:, :]
         else:
             assert self.chunk_k.shape[1] == 1
             assert self.chunk_v.shape[1] == 1
-            self._current_chunk_k = self.chunk_k
-            self._current_chunk_v = self.chunk_v
-            self._current_weights = weights
+            self._current_chunk_k[group_idx] = self.chunk_k
+            self._current_chunk_v[group_idx] = self.chunk_v
+            self._current_weights[group_idx] = weights
 
     def retrieve_chunks(self, indices):
         # indices: (N, chunk_num)
@@ -217,15 +218,18 @@ class ChunkKVManager:
             return chunk_k, chunk_v
 
     def reorder(self, beam_ids):
+        # warning: not tested!
         self.chunk_k = self.chunk_k.index_select(0, beam_idx.to(self.chunk_k.device))
         self.chunk_v = self.chunk_v.index_select(0, beam_idx.to(self.chunk_v.device))
         self.lmk_embs = self.lmk_embs.index_select(0, beam_idx.to(self.lmk_embs.device))
-        self._current_chunk_k = self._current_chunk_k.index_select(
-            0, beam_idx.to(self._current_chunk_k.device)
-        )
-        self._current_chunk_v = self._current_chunk_v.index_select(
-            0, beam_idx.to(self._current_chunk_v.device)
-        )
+
+        for group_i in range(self.group_size):
+            self._current_chunk_k[group_i] = self._current_chunk_k[group_i].index_select(
+                0, beam_idx.to(self._current_chunk_k.device)
+            )
+            self._current_chunk_v[group_i] = self._current_chunk_v[group_i].index_select(
+                0, beam_idx.to(self._current_chunk_v.device)
+            )
 
 
 class GroupCrossAttention(nn.Module):
@@ -310,15 +314,8 @@ class TritonGroupCrossAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
 
-        self.sm_n = 1.0 if config.enable_softmax_one else 0.0
-        # if (self.enc_chunk_size + 1) % 64 == 1:
-        #     print('enable triton gca_softmax1')
-        #     self.gca_attn = gca_attn_softmax1
-        #     self.gca_inf = gca_kv_cache_softmax1
-        # else:
-        #     print('enable triton gca')
-        #     self.gca_attn = gca_attn
-        #     self.gca_inf = gca_kv_cache
+        self.enable_softmax_one = getattr(config, 'enable_softmax_one', False)
+        self.sm_n = 1.0 if self.enable_softmax_one else 0.0
 
     @staticmethod
     def preprocess_chunk_kv_cache(
@@ -327,11 +324,6 @@ class TritonGroupCrossAttention(nn.Module):
         weights: torch.Tensor,  # (N D K)
         num_heads
     ):
-        # N = chunk_k.shape[0]
-        # D = chunk_k.shape[1]
-        # batch_indices = torch.arange(N, device=indices.device).unsqueeze(1)
-        # k = chunk_k[batch_indices, indices]
-        # v = chunk_v[batch_indices, indices]
         K = weights.shape[-1]
         k = rearrange(chunk_k, 'N (D K) S (h d) -> (N D) h K S d', K=K, h=num_heads)
         v = rearrange(chunk_v, 'N (D K) S (h d) -> (N D) h K S d', K=K, h=num_heads)
@@ -378,13 +370,11 @@ class TritonGroupCrossAttention(nn.Module):
 
         N = q.shape[0]
         q = rearrange(q, 'N D h S d->(N D) h S d')
-        # print(f'q shape: {q.shape}')
+
         assert q.shape[0] == weights.shape[0]
         assert q.shape[0] == chunk_k.shape[0]
         assert chunk_k.shape[-3] == weights.shape[-1], f'chunk_k.shape: {chunk_k.shape}, weights shape: {weights.shape}'
-        # print(q.shape)
-        # print(chunk_k.shape)
-        # print(weights.shape)
+
         q = q.contiguous()
         if chunk_size > 1 and self.training:
             weighted_vals = gca_attn(q, chunk_k, chunk_v, weights, 1 / math.sqrt(self.head_dim), self.sm_n)
@@ -400,9 +390,6 @@ class TritonGroupCrossAttention(nn.Module):
                 dtype=o.dtype,
                 device=hidden_states.device
             )
-            # fill_ids = self._get_fill_ids(hidden_states.shape[1], self.enc_chunk_size, hidden_states.device)
-            # assert o.shape[1] == (chunk_size - 1) * self.enc_chunk_size, f'{o.shape}, {(chunk_size - 1) * self.enc_chunk_size}'
-            # ret_vals[:, fill_ids, :] = o
             assert ret_vals.shape[1] - o.shape[1] == self.enc_chunk_size + 1
             ret_vals[:, -o.shape[1]:, :] = o
         else:
@@ -548,7 +535,9 @@ class DRT(LlamaPreTrainedModel):
         self.upper_layers = nn.ModuleList(
             [nn.ModuleList([UpperDecoderLayer(config) for _ in range(num_layer)]) for num_layer in config.decoder_layers[1:]]
         )
-
+        self.lmk_norms = nn.ModuleList(
+            [RMSNorm(config.hidden_size) for _ in range(self.num_groups)]
+        )
         assert sum(map(lambda x: len(x), self.upper_layers)) == sum(self.decoder_layers[1:])
 
         encoder_config = LlamaConfig(
@@ -612,12 +601,44 @@ class DRT(LlamaPreTrainedModel):
             if max_chunk_win != -1:
                 visible2 = dec_chunk_ids.unsqueeze(1) <= enc_chunk_ids.unsqueeze(0) + max_chunk_win
                 visible = visible & visible2
-            # memory leakage version
-            # visible = dec_chunk_ids.unsqueeze(1) >= enc_chunk_ids.unsqueeze(0)  # (dec_chunk_num, enc_chunk_num)
-            # print(visible)
+
             self.causal_masks[key] = ~visible
             # print(~visible)
         return self.causal_masks[key]
+    
+    def _perform_batch_retrieval(self, lmk_embs, chunk_kvs, group_idx, use_cache=False):
+        past_lmk_embs = chunk_kvs.past_lmk_embeds
+        
+        scores = torch.einsum('N C D, N E D->N C E', lmk_embs, past_lmk_embs) / math.sqrt(self.input_dim) # (N, dec_chunk_num, enc_chunk_num)
+        scores = scores.masked_fill_(self._enc_dec_score_mask(scores.shape[1], scores.shape[2]), float('-inf'))
+        # print(f'fwd scores after mask: {scores}')
+
+        if self.training:
+            noise = -torch.empty_like(
+                scores,
+                memory_format=torch.legacy_contiguous_format,
+                requires_grad=False).exponential_().log()
+        else:
+            noise = torch.zeros_like(scores)
+        chunk_top_k = min(scores.shape[-1], self.chunk_topk)
+
+        _, indices = torch.topk((scores + noise), dim=2, k=chunk_top_k)  # (N  chunk_num, topk)
+        chunk_weights = F.softmax(scores.gather(dim=2, index=indices), dim=-1)
+        chunk_weights = torch.nan_to_num(chunk_weights, nan=0.0)  # (N, chunk_num, topk)
+        # print(topk_weights)
+        indices_ = rearrange(indices[:, :-1, :], 'N D K->N (D K)')  # drop the last chunk
+        # print(f'batch retrieval weights: {chunk_weights}, indices: {indices}, group_idx: {group_idx}')
+        retrieved_chunk_k, retrieved_chunk_v = chunk_kvs.retrieve_chunks(indices_)
+        assert retrieved_chunk_k is not None
+        # drop the last chunk
+        org_weights = chunk_weights
+        chunk_k, chunk_v, chunk_weights = self.preprocess_chunk_kv_cache(
+            retrieved_chunk_k, retrieved_chunk_v, chunk_weights[:, :-1, :], self.num_heads
+        )
+        if use_cache and not self.training:
+            chunk_kvs.update_current_retrieved_chunk(indices, org_weights, group_idx)
+        # print(f'group idx: {group_idx} batch weights: {org_weights}')
+        return chunk_k, chunk_v, chunk_weights, indices
 
     def forward(
         self,
@@ -727,11 +748,12 @@ class DRT(LlamaPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
               
         N = input_ids.shape[0]
         L = input_ids.shape[1]
         if chunk_kvs is None:
-            chunk_kvs = ChunkKVManager(offloading)
+            chunk_kvs = ChunkKVManager(offloading, self.num_groups)
         
         if L % (self.enc_chunk_size + 1) == 0:
             # inference or training stage
@@ -739,95 +761,98 @@ class DRT(LlamaPreTrainedModel):
             # pos_embeds = self.position_embeddings(chunk_pos_ids).unsqueeze(0)
             chunk_hidden_states = rearrange(hidden_states, 'N (C S) D->(N C) S D', S=self.enc_chunk_size + 1)
             enc_outputs = self.encoder(inputs_embeds=self.enc_prenorm(chunk_hidden_states)) # + pos_embeds)
+            # enc_outputs = self.encoder(inputs_embeds=chunk_hidden_states)
             chunk_hidden_states = rearrange(enc_outputs.last_hidden_state, '(N C) S D->N C S D', N=N)
             lmk_embs = chunk_hidden_states[:, :, -1, :]
+            # lmk_embs = self.lmk_ln(chunk_hidden_states.mean(dim=-2))
             # print(f'batch lmk: {lmk_embs[0, :, :5]}')
-            mem_k = self.chunk_k_proj(chunk_hidden_states) # (N C S D)
+            # assert chunk_hidden_states.shape[-2] % 64 == 0, f'chunk_hidden_states.shape: {chunk_hidden_states.shape}'
+            chunk_k = self.chunk_k_proj(chunk_hidden_states) # (N C S D)
+            assert chunk_k.shape[-2] % 64 == 0 or chunk_k.shape[-2] % 64 == 1
+            if chunk_k.shape[-2] % 64 == 0:
+                chunk_k[:, :, -1, :] = 0  # set the landmark representation to zero, equivalant to softmax + 1
+            elif chunk_k.shape[-2] % 64 == 1:
+                chunk_k = chunk_k[:, :, :-1, :]  # remove landmark token
             # chunk_k = chunk_k_hidden[:, :-1, :, :]  # remove the last chunk
-            mem_v = self.chunk_v_proj(chunk_hidden_states)
+            chunk_v = self.chunk_v_proj(chunk_hidden_states)
+            if chunk_v.shape[-2] % 64 == 0:
+                chunk_v[:, :, -1, :] = 0
+            elif chunk_v.shape[-2] % 64 == 1:
+                chunk_v = chunk_v[:, :, :-1, :]
+            # chunk_v = chunk_v_hidden[:, :-1, :, :]
+            # print(f'batch chunk kv: {chunk_k[0, :, 0, :5]}')
+            chunk_kvs.append(chunk_k, chunk_v, lmk_embs)
 
-            chunk_kvs.append(mem_k, mem_v, lmk_embs)
-
+            assert L % (self.enc_chunk_size + 1) == 0
         else:
-            # for inference stage
-            # prepare retrieved chunks
-            chunk_k, chunk_v, chunk_weights = chunk_kvs.current_retrieved_chunk
-            # chunk_k, (N, 1, K, dim), chunk_weights: (N, 1, K)
-            chunk_k, chunk_v, chunk_weights = self.preprocess_chunk_kv_cache(
-                chunk_k, chunk_v, chunk_weights, self.num_heads
-            )
-
+            assert not self.training
             chunk_kvs.cache_lower_hidden_states(hidden_states)
             if input_ids.shape[1] == 2: # (input_id, lmk_id)
                 # update new chunk embeddings based on past kv cache
                 assert chunk_kvs.lower_hidden_states.shape[1] == self.enc_chunk_size + 1
-                chunk_pos_ids = torch.arange(self.enc_chunk_size + 1, device=input_ids.device)  # (enc_chunk_sz + 1)
-                pos_embeds = self.position_embeddings(chunk_pos_ids).unsqueeze(0)
+                # chunk_pos_ids = torch.arange(self.enc_chunk_size + 1, device=input_ids.device)  # (enc_chunk_sz + 1)
+                # pos_embeds = self.position_embeddings(chunk_pos_ids).unsqueeze(0)
                 chunk_hidden_states = chunk_kvs.lower_hidden_states  # (N, S + 1, dim)
                 chunk_kvs.clear_lower_hidden_states()
-                enc_outputs = self.encoder(inputs_embeds=self.enc_prenorm(chunk_hidden_states) + pos_embeds)
+                enc_outputs = self.encoder(inputs_embeds=self.enc_prenorm(chunk_hidden_states)) # + pos_embeds)
                 chunk_hidden_states = enc_outputs.last_hidden_state  #(N, S + 1, D)
                 lmk_embs = chunk_hidden_states[:, -1, :].unsqueeze(1)  # (N, 1, dim)
+                # lmk_embs = self.lmk_ln(chunk_hidden_states.mean(dim=-2)).unsqueeze(1)
                 # print(f'gen lmk: {lmk_embs[0, :, :5]}')
-                chunk_k_proj = self.chunk_k_proj(chunk_hidden_states) # (N, S + 1, D)
-                chunk_v_proj = self.chunk_v_proj(chunk_hidden_states) # (N, S + 1, D)
+                chunk_k = self.chunk_k_proj(chunk_hidden_states) # (N, S + 1, D)
+                chunk_v = self.chunk_v_proj(chunk_hidden_states) # (N, S + 1, D)
+                
+                if chunk_k.shape[-2] % 64 == 0:
+                    chunk_k[:, -1, :] = 0
+                elif chunk_k.shape[-2] % 64 == 1:
+                    chunk_k = chunk_k[:, :-1, :]
+                
+                if chunk_v.shape[-2] % 64 == 0:
+                    chunk_v[:, -1, :] = 0
+                elif chunk_v.shape[-2] % 64 == 1:
+                    chunk_v = chunk_v[:, :-1, :]
                 chunk_kvs.clear_lower_hidden_states()  # clear cached hidden states
-                chunk_kvs.append(chunk_k_proj[:, None, :-1, :], chunk_v_proj[:, None, :-1, :], lmk_embs)
-                # print(f'update chunk kv: {chunk_k_proj[0, 0, :5]}')
+                chunk_kvs.append(chunk_k[:, None, :, :], chunk_v[:, None, :, :], lmk_embs)
 
-                # update retrieved chunks accroding to the new landmark embedding
-                past_lmk_embs = chunk_kvs.past_lmk_embeds  # (N, ?, dim)
-                scores = torch.einsum('N C D, N E D->N C E', self.lmk_q_proj(lmk_embs), self.lmk_k_proj(past_lmk_embs)) / math.sqrt(self.input_dim) # (N, dec_chunk_num, enc_chunk_num)
-                # print(f'update scores: {scores}')
-                scores = scores.masked_fill_(self._enc_dec_score_mask(scores.shape[1], scores.shape[2]), float('-inf'))
-                # print(f'update scores after mask: {scores}')
-                chunk_top_k = min(scores.shape[-1], self.chunk_topk)
-                _, indices = torch.topk(scores, dim=2, k=chunk_top_k)  # (N, 1, K)
-                weights = F.softmax(scores.gather(dim=2, index=indices), dim=-1)
-                indices = indices.squeeze(1)
-                assert weights.shape[1] == 1
-                # print(f'update indices: {indices}, {weights[:, :1, :]}')
-                chunk_kvs.update_current_retrieved_chunk(indices, weights[:, :1, :])
-
-        lower_layer_num = len(self.lower_layers)
-        for group_idx in range(self.num_groups):
+        lower_layer_num_offset = len(self.lower_layers)
+        # print(chunk_mark_ids)
+        for group_idx in range(self.num_groups):  # 0 ~ group_size - 1
+            # perform retrieval/ TODO: L + prev_len
             if L % (self.enc_chunk_size + 1) == 0:
-                q_lmk_emb = rearrange(hidden_states, 'N (C S) D->N C S D', S=self.enc_chunk_size + 1)[:, :, -1, :]
-                scores = torch.einsum('N C D, N E D->N C E', q_lmk_emb, lmk_embs) / math.sqrt(self.input_dim) # (N, dec_chunk_num, enc_chunk_num)
-                # print(f'fwd scores: {scores}')
-                scores = scores.masked_fill_(self._enc_dec_score_mask(scores.shape[1], scores.shape[2]), float('-inf'))
-                # print(f'fwd scores after mask: {scores}')
-
-                if self.training:
-                    noise = -torch.empty_like(
-                        scores,
-                        memory_format=torch.legacy_contiguous_format,
-                        requires_grad=False).exponential_().log()
-                else:
-                    noise = torch.zeros_like(scores)
-                chunk_top_k = min(scores.shape[-1], self.chunk_topk)
-
-                _, indices = torch.topk((scores + noise), dim=2, k=chunk_top_k)  # (N  chunk_num, topk)
-                chunk_weights = F.softmax(scores.gather(dim=2, index=indices), dim=-1)
-                chunk_weights = torch.nan_to_num(chunk_weights, nan=0.0)  # (N, chunk_num, topk)
-                # print(topk_weights)
-                indices_ = rearrange(indices[:, :-1, :], 'N D K->N (D K)')  # drop the last chunk
-                # retrieved_chunk_k, retrieved_chunk_v = chunk_kvs.retrieve_chunks(indices_)
-                batch_indices = torch.arange(N, device=indices_.device).unsqueeze(1)
-                retrieved_chunk_k = mem_k[batch_indices, indices_]
-                retrieved_chunk_v = mem_v[batch_indices, indices_]
-
-                assert retrieved_chunk_k is not None
-                # drop the last chunk
-                org_weights = chunk_weights
+                q_embs = rearrange(hidden_states, 'N (C S) d-> N C S d', S=self.enc_chunk_size + 1)[:, :, -1, :]
+                q_embs = self.lmk_norms[group_idx](q_embs)
+                chunk_k, chunk_v, chunk_weights, indices = self._perform_batch_retrieval(q_embs, chunk_kvs, group_idx, use_cache=use_cache)
+            else:
+                assert not self.training
+                # for inference stage
+                # prepare retrieved chunks
+                chunk_k, chunk_v, chunk_weights = chunk_kvs.current_retrieved_chunk(group_idx)
+                # chunk_k, (N, 1, K, dim), chunk_weights: (N, 1, K)
                 chunk_k, chunk_v, chunk_weights = self.preprocess_chunk_kv_cache(
-                    retrieved_chunk_k, retrieved_chunk_v, chunk_weights[:, :-1, :], self.num_heads
+                    chunk_k, chunk_v, chunk_weights, self.num_heads
                 )
-                # print(f'batch indices: {indices}, chunk_weights: {org_weights}')
-                if use_cache:
-                    chunk_kvs.update_current_retrieved_chunk(indices, org_weights)
+                # print(f'input ids shape: {input_ids.shape}')
+                if input_ids.shape[1] == 2: # (input_id, lmk_id)
+                    past_lmk_embs = chunk_kvs.past_lmk_embeds  # (N, ?, dim)
+                    lmk_embs = hidden_states[:, -1:, :]
+                    scores = torch.einsum('N C D, N E D->N C E', lmk_embs, past_lmk_embs) / math.sqrt(self.input_dim) # (N, dec_chunk_num, enc_chunk_num)
+                    # print(f'update scores: {scores}')
+                    scores = scores.masked_fill_(self._enc_dec_score_mask(scores.shape[1], scores.shape[2]), float('-inf'))
+                    # print(f'update scores after mask: {scores}')
+                    chunk_top_k = min(scores.shape[-1], self.chunk_topk)
+                    _, indices = torch.topk(scores, dim=2, k=chunk_top_k)  # (N, 1, K)
+                    weights = F.softmax(scores.gather(dim=2, index=indices), dim=-1)
+                    indices = indices.squeeze(1)
+                    # print(f'single step retrieval weights: {weights}, indices: {indices}, group_idx: {group_idx}')
+                    assert weights.shape[1] == 1
+                    # print(f'update indices: {indices}, {weights}')
+                    chunk_kvs.update_current_retrieved_chunk(indices, weights[:, :1, :], group_idx)
+                    # tmp_k, _, _ = chunk_kvs.current_retrieved_chunk(group_idx)
+            
+
             for idx, decoder_layer in enumerate(self.upper_layers[group_idx]):
-                idx += lower_layer_num
+                idx += lower_layer_num_offset
+                # print(f'upper layer idx: {idx}')
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
 
@@ -867,8 +892,8 @@ class DRT(LlamaPreTrainedModel):
 
                 if output_attentions:
                     all_self_attns += (layer_outputs[1],)
-            
-            lower_layer_num += len(self.upper_layers[group_idx])
+
+            lower_layer_num_offset += len(self.upper_layers[group_idx])
 
         hidden_states = self.norm(hidden_states)
  
@@ -877,16 +902,6 @@ class DRT(LlamaPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = (next_decoder_cache, chunk_kvs) if use_cache else None
-
-        # observe out hidden states for specified range
-        # if next_decoder_cache[0][0].shape[2] >= 131 and next_decoder_cache[0][0].shape[2] < 241:
-        #     print(f'gen output hidden: {hidden_states[0, 0, :5]}, cache len: {next_decoder_cache[0][0].shape[2]}')
-
-        # if input_ids.shape[1] % (self.enc_chunk_size + 1) == 0 and input_ids.shape[1] > 500:
-        #     print(f'fwd output hidden: {hidden_states[0, 130: 240, :5]}')
-
-        # if input_ids.shape[1] % (self.enc_chunk_size + 1) == 0:
-        #     print(f'30-64: {hidden_states[0, 30: 64, :5]}')
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
